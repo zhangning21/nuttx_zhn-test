@@ -1,0 +1,232 @@
+# Fork-only validation for the "ntfc" CI group.
+#
+# This file exists to exercise, inside a personal fork, exactly what
+# open-vela/public-actions#69 adds to ci-real.yml: build one task with CMake and
+# then run NTFC on the result. It is NOT proposed upstream; it lives only on the
+# ci/ntfc-fork-validation branch of the fork.
+#
+# Differences from ci-real.yml, all of them deliberate:
+#   - no App token, no PR statuses or comments (those need open-vela secrets);
+#   - a single task instead of the group matrix;
+#   - the build output is teed to a log and uploaded even when the build fails,
+#     because surfacing the real error is the whole point;
+#   - "repo forall git clean" after the build is skipped, so the failed tree can
+#     be inspected. The artifacts are still copied back into nuttx/ the same way
+#     the real workflow does it.
+#
+# The image, manifest, groups, build command and NTFC invocation are identical
+# to the real thing.
+
+name: NTFC fork validation
+
+on:
+  push:
+    branches: [ci/ntfc-fork-validation]
+  workflow_dispatch:
+    inputs:
+      task:
+        description: 'Task with flags, e.g. sim:citest@cmake@ntfc'
+        default: 'sim:citest@cmake@ntfc'
+        required: true
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  ntfc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      DOCKER_BUILDKIT: 1
+      CI_IMAGE: ghcr.io/open-vela/openvela-ci-linux_from_apache-nuttx:latest
+      MANIFEST_BRANCH: dev
+      UNDER_TEST_BRANCH: ci/sim-citest-ntfc
+      TASK: ${{ github.event.inputs.task || 'sim:citest@cmake@ntfc' }}
+    steps:
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@v10
+        with:
+          root-reserve-mb: 4096
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+
+      - name: Download and install repo
+        run: |
+          mkdir -p ~/bin
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
+          ~/bin/repo --version
+          git config --global user.email "openvela-robot@xiaomi.com"
+          git config --global user.name "openvela-robot"
+
+      - name: Clean up disk space
+        run: |
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          sudo rm -rf /etc/apt/sources.list.d/* /usr/local/lib/android /etc/mysql /etc/php /opt/hostedtoolcache/CodeQL
+          sudo docker builder prune -a 2>/dev/null || true
+          df -h
+
+      - name: Repo init and sync
+        run: |
+          ~/bin/repo init -u https://github.com/open-vela/manifests \
+            -b "$MANIFEST_BRANCH" -m openvela.xml \
+            --group=default,platform-linux --depth=1 --git-lfs
+          ~/bin/repo sync -c -d --no-tags -j12
+          df -h
+          ls -al
+
+      - name: Apply the nuttx change under test
+        run: |
+          set -x
+          cd nuttx
+          git fetch "https://github.com/${{ github.repository }}.git" \
+            "$UNDER_TEST_BRANCH:under-test"
+          git log --oneline -3 under-test
+          commits=$(git rev-list --reverse HEAD..under-test)
+          if [ -z "$commits" ]; then
+            echo "nothing to apply; the branch is already contained in dev"
+          else
+            git cherry-pick $commits
+          fi
+          echo "=== configuration under test ==="
+          ls -l boards/sim/sim/sim/configs/citest/
+          grep -n CONFIG_SYSTEM_SETLOGMASK boards/sim/sim/sim/configs/citest/defconfig
+
+      - name: Move docker data to build volume
+        run: |
+          sudo systemctl stop docker
+          sudo mv /var/lib/docker "${{ github.workspace }}/docker"
+          sudo ln -s "${{ github.workspace }}/docker" /var/lib/docker
+          sudo systemctl start docker
+
+      - name: Docker pull
+        run: |
+          docker pull "$CI_IMAGE"
+          df -h
+
+      - name: Build the task and run NTFC
+        id: run
+        continue-on-error: true
+        env:
+          CI_WORKSPACE: ${{ github.workspace }}
+        run: |
+          set -o pipefail
+          mkdir -p logs
+
+          task="$TASK"
+          cmake_flag=""
+          cp_base_dir="nuttx"
+          task_flags=""
+          run_ntfc=0
+          echo "=== Starting task: $task ==="
+          if [[ "$task" == *@* ]]; then
+            cmake_flag="--cmake"
+            task_flags="${task#*@}"
+            task=$(echo "$task" | awk -F '@' '{print $1}')
+            cp_base_dir="cmake_out/*"
+          fi
+          if [[ "@${task_flags}@" == *"@ntfc@"* ]]; then
+            run_ntfc=1
+          fi
+          if [[ "$task" == *:* ]] || [[ "$task" == *vendor/* ]]; then
+            build_cmd="./build.sh $task $cmake_flag -e -Werror -j8"
+          else
+            build_cmd="./build.sh vendor/openvela/boards/vela/configs/$task $cmake_flag -e -Werror -j8"
+          fi
+          echo "task=$task  flags=${task_flags:-none}  ntfc=$run_ntfc"
+          echo "$build_cmd"
+
+          set +e
+          docker run --rm \
+            -v "${CI_WORKSPACE}":/workspace \
+            -w /workspace \
+            "$CI_IMAGE" \
+            /bin/bash -c "pwd && df -h && $build_cmd && ls -atl nuttx" 2>&1 | tee logs/build.log
+          build_rc=${PIPESTATUS[0]}
+          set -e
+          echo "build_rc=$build_rc" | tee logs/build_rc.txt
+          if [ "$build_rc" -ne 0 ]; then
+            echo "::error::build failed for $task (rc=$build_rc); see the build.log artifact"
+            echo "=== last 80 lines ==="
+            tail -n 80 logs/build.log
+            exit "$build_rc"
+          fi
+
+          echo "=== Backup build results for $task ==="
+          ci_artifact_name="artifacts/${task//:/_}"
+          mkdir -p "$ci_artifact_name"
+          cp ${cp_base_dir}/nuttx ${cp_base_dir}/.config "$ci_artifact_name"
+          ls -al "$ci_artifact_name"
+
+          if [ "$run_ntfc" -eq 1 ]; then
+            echo "=== Run NTFC runtime test: $task ==="
+            ntfc_board="${task%%:*}"
+            ntfc_config="${task##*:}"
+            ntfc_cfgdir=$(ls -d nuttx/boards/*/*/"${ntfc_board}"/configs/"${ntfc_config}" 2>/dev/null | head -1)
+            if [ -z "$ntfc_cfgdir" ] || [ ! -f "$ntfc_cfgdir/config.yaml" ] || [ ! -x "$ntfc_cfgdir/run.sh" ]; then
+              echo "::error::$task is flagged ntfc but has no config.yaml and executable run.sh"
+              exit 1
+            fi
+            echo "NTFC metadata: $ntfc_cfgdir"
+            set +e
+            docker run --rm \
+              -v "${CI_WORKSPACE}":/workspace \
+              -w /workspace \
+              -e NTFCDIR=/workspace/.ntfc \
+              -e CURRENTCONFDIR="/workspace/${ntfc_cfgdir}" \
+              -e ARTIFACTCONFDIR="/workspace/${ci_artifact_name}" \
+              "$CI_IMAGE" \
+              /bin/bash -c "set -e && python3 --version && \
+                python3 -m venv /workspace/.ntfc-venv && \
+                /workspace/.ntfc-venv/bin/pip install --quiet ntfc==0.0.1 pytest==7.4.4 && \
+                export PATH=/workspace/.ntfc-venv/bin:\$PATH && ntfc --help > /dev/null && \
+                rm -rf /workspace/.ntfc && mkdir -p /workspace/.ntfc/external && \
+                git clone --depth=1 --branch release-0.0.1 \
+                  https://github.com/apache/nuttx-ntfc-testing.git \
+                  /workspace/.ntfc/external/nuttx-testing && \
+                cp -a ${ci_artifact_name}/. nuttx/ && ls -atl nuttx/nuttx nuttx/.config && \
+                bash /workspace/${ntfc_cfgdir}/run.sh" 2>&1 | tee logs/ntfc.log
+            ntfc_rc=${PIPESTATUS[0]}
+            set -e
+            echo "ntfc_rc=$ntfc_rc" | tee logs/ntfc_rc.txt
+            if [ "$ntfc_rc" -ne 0 ]; then
+              echo "::error::NTFC failed for $task (rc=$ntfc_rc); see the ntfc.log artifact"
+              exit "$ntfc_rc"
+            fi
+            echo "NTFC runtime test passed: $task"
+          fi
+
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          mkdir -p logs
+          df -h > logs/df.txt 2>&1 || true
+          ls -al > logs/workspace-ls.txt 2>&1 || true
+          ls -al nuttx 2>/dev/null > logs/nuttx-ls.txt || true
+          ls -al cmake_out/* 2>/dev/null > logs/cmake_out-ls.txt || true
+          find artifacts -type f 2>/dev/null | head -50 > logs/artifacts-list.txt || true
+          # the NTFC report, if the run got that far
+          find artifacts -type d -name ntfc 2>/dev/null | head -5 >> logs/artifacts-list.txt || true
+
+      - name: Upload logs and artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ntfc-fork-validation
+          path: |
+            logs
+            artifacts
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Propagate the result
+        if: always()
+        run: |
+          echo "build/NTFC step outcome: ${{ steps.run.outcome }}"
+          test "${{ steps.run.outcome }}" = "success"
