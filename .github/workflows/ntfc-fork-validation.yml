@@ -202,6 +202,45 @@ jobs:
             echo "NTFC runtime test passed: $task"
           fi
 
+      - name: Enumerate every failure without changing anything
+        if: always()
+        env:
+          CI_WORKSPACE: ${{ github.workspace }}
+        run: |
+          # Diagnostics only. Nothing in the workspace, the toolchain or the
+          # configuration is modified. ninja stops scheduling new work after the
+          # first failures, so the previous step only reported whatever happened
+          # to be in flight. Re-invoking the already generated build system with
+          # keep-going enumerates every target that fails on its own, which is
+          # what "expose the problems first" needs.
+          mkdir -p logs
+          bdir=$(ls -d cmake_out/* 2>/dev/null | head -1)
+          if [ -z "$bdir" ]; then
+            echo "no cmake build directory; the failure happened before configure"
+            exit 0
+          fi
+          echo "build dir: $bdir"
+          docker run --rm \
+            -v "${CI_WORKSPACE}":/workspace \
+            -w /workspace \
+            "$CI_IMAGE" \
+            /bin/bash -c "
+              echo '=== toolchain identity ===' ;
+              for c in prebuilts/tools/linux/x86_64/c++ prebuilts/tools/linux/x86_64/gcc ; do
+                [ -x \"\$c\" ] && { echo \"--- \$c\" ; \"\$c\" --version | head -3 ; } ;
+              done ;
+              which g++ gcc clang++ 2>/dev/null ;
+              g++ --version 2>/dev/null | head -1 ;
+              echo '=== keep-going build ===' ;
+              cmake --build $bdir -- -k 0
+            " 2>&1 | tee logs/keepgoing.log || true
+          echo "=== failure inventory ==="
+          grep -E "^FAILED: " logs/keepgoing.log | sed 's/^FAILED: //' | sort -u | tee logs/failed-targets.txt
+          echo "distinct failing targets: $(wc -l < logs/failed-targets.txt)"
+          echo "=== distinct error lines ==="
+          grep -oE "error: .*" logs/keepgoing.log | sed 's/[0-9]\+/N/g' | sort | uniq -c \
+            | sort -rn | head -40 | tee logs/error-summary.txt
+
       - name: Collect diagnostics
         if: always()
         run: |
