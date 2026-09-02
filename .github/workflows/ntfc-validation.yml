@@ -153,7 +153,12 @@ jobs:
           coe_fk = fk["jobs"]["ci-tasks"].get("continue-on-error")
           coe_up = up["jobs"]["ci-tasks"].get("continue-on-error")
           check(coe_up is None, "upstream ci-tasks has no continue-on-error", repr(coe_up))
-          check(coe_fk == "${{ matrix.experimental || false }}",
+          # Build the expected value at runtime. Written literally it would be
+          # substituted by the Actions expression engine before this script ever
+          # reaches the shell, and in this job there is no matrix context, so it
+          # would arrive as "false" and never match the real file.
+          want_coe = "$" + "{{ matrix.experimental || false }}"
+          check(coe_fk == want_coe,
                 "fork gates continue-on-error on the experimental flag", repr(coe_fk))
 
           # Nothing outside ci-tasks may change.
