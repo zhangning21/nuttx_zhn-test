@@ -32,6 +32,25 @@
 # The nuttx change under test is applied to the manifest checkout by
 # cherry-pick, because the branch is based on the same open-vela/nuttx dev
 # commit that the manifest resolves to.
+#
+# What this run is expected to show, after public-actions e0a2d31 started
+# pruning the manifest's vendored libc++ for ntfc-flagged tasks:
+#
+#   - the prune happens, and the directory listing recorded right after it
+#     shows the vendored checkout gone;
+#   - libs/libxx/libcxx/CMakeLists.txt then takes its FetchContent branch,
+#     downloading libcxx-17.0.6.src.tar.xz and applying the five NuttX
+#     patches, so the build no longer compiles the clang-only fork;
+#   - all 35 previously failing targets clear, including the two outside
+#     libcxx itself (libcxxabi's cxa_demangle.cpp and apps cxxtest), which
+#     only failed because they include headers from the pruned path;
+#   - the build reaches the NTFC step, which no earlier validation run did.
+#
+# Two things remain unverified going in: whether the upstream libc++ builds
+# clean with the GCC 12.3.0 that the manifest ships (openvela carries five
+# patches where Apache carries six, missing the GCC 14 one, which 12.3.0 is
+# not expected to need), and whether the runner can reach the LLVM release
+# download that FetchContent now requires.
 
 name: NTFC validation
 
