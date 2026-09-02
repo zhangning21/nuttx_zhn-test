@@ -275,6 +275,9 @@ jobs:
           bash /workspace/${ntfc_cfgdir}/run.sh
           ghcr.io/open-vela/openvela-ci-linux_from_apache-nuttx:latest
           ntfc_cfgdir=$(ls -d nuttx/boards/*/*/"${ntfc_board}"/configs/"${ntfc_config}" 2>/dev/null | head -1)
+          vendored_libcxx=nuttx/libs/libxx/libcxx/libcxx
+          if [ -d "$vendored_libcxx" ]; then
+          rm -rf "$vendored_libcxx"
           NEEDLES
           echo
           if [ "$fail" -ne 0 ]; then
@@ -408,6 +411,21 @@ jobs:
           fi
           echo "task=$task  flags=${task_flags:-none}  ntfc=$run_ntfc"
           echo "build_cmd=$build_cmd"
+
+          if [ "$run_ntfc" -eq 1 ]; then
+            # Mirrors ci-real.yml. The orchestration job asserts these lines are
+            # present verbatim in the real file.
+            vendored_libcxx=nuttx/libs/libxx/libcxx/libcxx
+            if [ -d "$vendored_libcxx" ]; then
+              echo "Removing the vendored libc++ for the ntfc build: $vendored_libcxx"
+              rm -rf "$vendored_libcxx"
+            else
+              echo "No vendored libc++ present; nothing to remove."
+            fi
+            # Record what the prune actually changed, so the log shows whether
+            # the upstream FetchContent path was taken afterwards.
+            ls -d nuttx/libs/libxx/libcxx/* 2>/dev/null | tee logs/libcxx-after-prune.txt || true
+          fi
 
           set +e
           docker run --rm \
