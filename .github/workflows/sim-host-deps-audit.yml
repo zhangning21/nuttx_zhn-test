@@ -1,0 +1,150 @@
+# Audit which host libraries a sim build needs and whether the community CI
+# image provides them.
+#
+# NOT FOR UPSTREAM. Diagnostic only, lives on this audit branch.
+#
+# Context: linking sim:citest in the community image fails with
+# "cannot find -lunwind". arch/sim adds -lunwind unconditionally in both the
+# CMake and Make flows (arch/sim/src/sim/CMakeLists.txt and
+# arch/sim/src/Makefile), Apache NuttX has no such line, the openvela manifest
+# ships no unwind project, and the image has no libunwind. This job finds out
+# whether unwind is the only such gap or just the first one hit.
+#
+# These are host link libraries, not manifest projects: sim links a host
+# executable, while everything under prebuilts/ in the manifest is a cross
+# toolchain. So the question is what the IMAGE must provide, and the manifest
+# is only checked to confirm it provides none of them.
+
+name: sim host deps audit
+
+on:
+  push:
+    branches: [ci/sim-host-deps-audit]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CI_IMAGE: ghcr.io/open-vela/openvela-ci-linux_from_apache-nuttx:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Docker pull
+        run: docker pull "$CI_IMAGE"
+
+      # Every library arch/sim can put into STDLIBS, in either flow, plus the
+      # header each one needs. Probed by actually asking the compiler to link,
+      # which is the same question the real build asks.
+      - name: Probe host libraries and headers in the image
+        run: |
+          cat > /tmp/probe.sh <<'EOS'
+          set -u
+          CXX=c++
+          echo "compiler: $($CXX --version | head -1)"
+          echo
+          printf '%-12s %-10s %-10s %s\n' LIBRARY LINK HEADER "HEADER PATH"
+          probe() {
+            lib="$1"; hdr="$2"
+            if echo 'int main(){return 0;}' | $CXX -x c++ - -l"$lib" -o /dev/null 2>/dev/null; then
+              link=OK
+            else
+              link=MISSING
+            fi
+            if [ -n "$hdr" ]; then
+              if echo "#include <$hdr>
+          int main(){return 0;}" | $CXX -x c++ - -fsyntax-only 2>/dev/null; then
+                h=OK
+              else
+                h=MISSING
+              fi
+            else
+              h=n/a
+            fi
+            printf '%-12s %-10s %-10s %s\n' "$lib" "$link" "$h" "$hdr"
+          }
+          probe pthread   ""
+          probe unwind    libunwind.h
+          probe z         zlib.h
+          probe rt        ""
+          probe m         math.h
+          probe gcov      ""
+          probe asound    alsa/asoundlib.h
+          probe v4l2      linux/videodev2.h
+          probe X11       X11/Xlib.h
+          probe Xext      X11/extensions/Xext.h
+          probe usb-1.0   libusb-1.0/libusb.h
+          probe c++abi    ""
+          echo
+          echo "--- any libunwind file present in the image ---"
+          ( ldconfig -p 2>/dev/null | grep -i unwind ) || echo "(ldconfig: none)"
+          find / -name 'libunwind*' -not -path '*/proc/*' 2>/dev/null | head -10 || true
+          echo "(end)"
+          EOS
+          docker run --rm -v /tmp/probe.sh:/probe.sh "$CI_IMAGE" bash /probe.sh \
+            2>&1 | tee /tmp/probe-out.txt
+
+      - name: Which sim configs need which extra library
+        run: |
+          set -uo pipefail
+          echo "sim configs in this tree: $(ls -d boards/sim/sim/sim/configs/*/ 2>/dev/null | wc -l)"
+          echo
+          printf '%-26s %s\n' CONFIG_OPTION "-> library, and how many sim configs enable it"
+          for pair in \
+            "CONFIG_FS_FAT:z" \
+            "CONFIG_LIBM_TOOLCHAIN:m" \
+            "CONFIG_SIM_SOUND_ALSA:asound" \
+            "CONFIG_SIM_CAMERA_V4L2:v4l2" \
+            "CONFIG_SIM_X11FB:X11+Xext" \
+            "CONFIG_SIM_LIBUSB:usb-1.0" \
+            "CONFIG_COVERAGE_TOOLCHAIN:gcov" \
+            "CONFIG_SCHED_BACKTRACE:unwind(Make cond path)" ; do
+            opt="${pair%%:*}"; lib="${pair##*:}"
+            n=$(grep -rl "^${opt}=y" boards/sim/sim/sim/configs/*/defconfig 2>/dev/null | wc -l | tr -d ' ')
+            printf '%-26s -> %-24s %s config(s)\n' "$opt" "$lib" "$n"
+          done
+          echo
+          echo "--- citest specifically ---"
+          for opt in CONFIG_FS_FAT CONFIG_LIBM_TOOLCHAIN CONFIG_SIM_SOUND_ALSA \
+                     CONFIG_SIM_CAMERA_V4L2 CONFIG_SIM_X11FB CONFIG_SIM_LIBUSB \
+                     CONFIG_COVERAGE_TOOLCHAIN CONFIG_SCHED_BACKTRACE; do
+            if grep -q "^${opt}=y" boards/sim/sim/sim/configs/citest/defconfig 2>/dev/null; then
+              echo "  $opt=y"
+            fi
+          done
+
+      - name: Confirm the manifest provides none of these
+        run: |
+          set -uo pipefail
+          curl -fsSL https://raw.githubusercontent.com/open-vela/manifests/dev/openvela.xml -o /tmp/m.xml
+          echo "manifest projects: $(grep -c '<project' /tmp/m.xml)"
+          for name in unwind libunwind zlib alsa alsa-lib v4l-utils libusb libx11 libxext; do
+            hit=$(grep -ic "\"[^\"]*${name}[^\"]*\"" /tmp/m.xml || true)
+            printf '  %-12s occurrences in manifest: %s\n' "$name" "$hit"
+          done
+          echo
+          echo "--- prebuilts projects (all cross toolchains / tools, no host libs) ---"
+          grep -oE 'path="prebuilts/[^"]*"' /tmp/m.xml | sed 's/path="//;s/"//' | sort
+
+      - name: Summary
+        if: ${{ always() }}
+        run: |
+          {
+            echo "### sim host dependency audit"
+            echo
+            echo '```'
+            cat /tmp/probe-out.txt 2>/dev/null | head -40
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: sim-host-deps-audit
+          path: /tmp/probe-out.txt
+          retention-days: 14
