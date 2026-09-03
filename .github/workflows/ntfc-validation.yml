@@ -298,6 +298,7 @@ jobs:
           if [ -d "$vendored_libcxx" ]; then
           rm -rf "$vendored_libcxx"
           apt-get install -y -qq --no-install-recommends libunwind-dev libunwind-dev:i386
+          apt-get install -y -qq --no-install-recommends python3-venv
           NEEDLES
           echo
           if [ "$fail" -ne 0 ]; then
@@ -493,6 +494,8 @@ jobs:
               -e ARTIFACTCONFDIR="/workspace/${ci_artifact_name}" \
               "$CI_IMAGE" \
               /bin/bash -c "set -e && python3 --version && \
+                apt-get update -qq && \
+                apt-get install -y -qq --no-install-recommends python3-venv && \
                 python3 -m venv /workspace/.ntfc-venv && \
                 /workspace/.ntfc-venv/bin/pip install --quiet ntfc==0.0.1 pytest==7.4.4 && \
                 export PATH=/workspace/.ntfc-venv/bin:\$PATH && ntfc --help > /dev/null && \
@@ -512,14 +515,22 @@ jobs:
             echo "NTFC runtime test passed: $task"
           fi
 
-      # If the build failed, enumerate every independently failing target rather
-      # than stopping at the first one, so one run yields the whole list.
+      # If the BUILD failed, enumerate every independently failing target rather
+      # than stopping at the first one, so one run yields the whole list. Gated
+      # on build_rc rather than the step outcome: when the build succeeds and
+      # only NTFC fails, re-running the build here would relink an already
+      # complete tree and report a bogus failing target.
       - name: Enumerate all build failures
         if: ${{ steps.run.outcome == 'failure' }}
         continue-on-error: true
         run: |
           set -o pipefail
           mkdir -p logs
+          if [ "$(cat logs/build_rc.txt 2>/dev/null | tr -dc '0-9')" = "0" ]; then
+            echo "build_rc=0: the build succeeded and the failure came later"
+            echo "(nothing to enumerate; see ntfc.log)"
+            exit 0
+          fi
           bdir=$(ls -d cmake_out/* 2>/dev/null | head -1)
           if [ -z "$bdir" ]; then
             echo "no cmake build directory; the failure happened before configure"
