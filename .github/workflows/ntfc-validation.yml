@@ -297,6 +297,7 @@ jobs:
           vendored_libcxx=nuttx/libs/libxx/libcxx/libcxx
           if [ -d "$vendored_libcxx" ]; then
           rm -rf "$vendored_libcxx"
+          apt-get install -y -qq --no-install-recommends libunwind-dev libunwind-dev:i386
           NEEDLES
           echo
           if [ "$fail" -ne 0 ]; then
@@ -413,6 +414,7 @@ jobs:
           cp_base_dir="nuttx"
           task_flags=""
           run_ntfc=0
+          ntfc_prep=""
           echo "=== Starting task: $task ==="
           if [[ "$task" == *@* ]]; then
             cmake_flag="--cmake"
@@ -444,6 +446,11 @@ jobs:
             # Record what the prune actually changed, so the log shows whether
             # the upstream FetchContent path was taken afterwards.
             ls -d nuttx/libs/libxx/libcxx/* 2>/dev/null | tee logs/libcxx-after-prune.txt || true
+            # Mirrors ci-real.yml: arch/sim links -lunwind unconditionally but
+            # the image has only the libunwind8 runtime, so install the dev
+            # package inside the build container. Both arches because seven sim
+            # configs are 32-bit and the package is Multi-Arch: same.
+            ntfc_prep="apt-get update -qq && apt-get install -y -qq --no-install-recommends libunwind-dev libunwind-dev:i386 && "
           fi
 
           set +e
@@ -451,7 +458,7 @@ jobs:
             -v "${CI_WORKSPACE}":/workspace \
             -w /workspace \
             "$CI_IMAGE" \
-            /bin/bash -c "$build_cmd" 2>&1 | tee logs/build.log
+            /bin/bash -c "${ntfc_prep}$build_cmd" 2>&1 | tee logs/build.log
           build_rc=${PIPESTATUS[0]}
           set -e
           echo "build_rc=$build_rc" | tee logs/build_rc.txt
