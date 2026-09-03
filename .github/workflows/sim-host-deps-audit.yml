@@ -89,12 +89,57 @@ jobs:
           docker run --rm -v /tmp/probe.sh:/probe.sh "$CI_IMAGE" bash /probe.sh \
             2>&1 | tee /tmp/probe-out.txt
 
+      - name: Can libunwind-dev coexist across architectures
+        run: |
+          cat > /tmp/marfch.sh <<'EOS'
+          set -u
+          echo "=== dpkg architectures configured in the image ==="
+          dpkg --print-architecture
+          dpkg --print-foreign-architectures || echo "(no foreign arch)"
+          echo
+          echo "=== is i386 already enabled? if not, enable and update ==="
+          if ! dpkg --print-foreign-architectures | grep -q i386; then
+            dpkg --add-architecture i386
+          fi
+          apt-get update -qq 2>/dev/null | tail -2 || true
+          echo
+          echo "=== Multi-Arch field decides whether both can coexist ==="
+          for p in libunwind-dev libunwind8 zlib1g-dev libasound2-dev; do
+            echo "--- $p"
+            apt-cache show "$p" 2>/dev/null \
+              | grep -E '^(Package|Architecture|Multi-Arch|Version):' \
+              | head -8
+            echo
+          done
+          echo "=== currently installed libunwind* ==="
+          dpkg -l | grep -i unwind || echo "(none installed via dpkg -l filter)"
+          echo
+          echo "############ SIMULATION 1: amd64 dev alone ############"
+          apt-get install -s -y libunwind-dev 2>&1 | grep -E '^(Inst|Remv|Conf|E:|The following|WARNING)' | head -20
+          echo
+          echo "############ SIMULATION 2: i386 dev alone (the case the comment warns about) ############"
+          apt-get install -s -y libunwind-dev:i386 2>&1 | grep -E '^(Inst|Remv|Conf|E:|The following|WARNING)' | head -20
+          echo
+          echo "############ SIMULATION 3: BOTH at once (the question asked) ############"
+          apt-get install -s -y libunwind-dev libunwind-dev:i386 2>&1 | grep -E '^(Inst|Remv|Conf|E:|The following|WARNING)' | head -30
+          echo
+          echo "=== does amd64 dev alone give us the .so symlink we need? ==="
+          apt-get install -y -qq libunwind-dev >/dev/null 2>&1 \
+            && ls -l /usr/lib/x86_64-linux-gnu/libunwind.so 2>&1 \
+            && ls -l /usr/include/libunwind.h 2>&1 \
+            && echo 'int main(){return 0;}' | c++ -x c++ - -lunwind -o /dev/null \
+               && echo "LINK -lunwind: OK after installing libunwind-dev" \
+               || echo "LINK -lunwind: still failing"
+          echo "(end)"
+          EOS
+          docker run --rm -v /tmp/marfch.sh:/marfch.sh "$CI_IMAGE" bash /marfch.sh \
+            2>&1 | tee /tmp/marfch-out.txt
+
       - name: Which sim configs need which extra library
         run: |
-          set -uo pipefail
+          set -u
           echo "sim configs in this tree: $(ls -d boards/sim/sim/sim/configs/*/ 2>/dev/null | wc -l)"
           echo
-          printf '%-26s %s\n' CONFIG_OPTION "-> library, and how many sim configs enable it"
           for pair in \
             "CONFIG_FS_FAT:z" \
             "CONFIG_LIBM_TOOLCHAIN:m" \
@@ -103,10 +148,11 @@ jobs:
             "CONFIG_SIM_X11FB:X11+Xext" \
             "CONFIG_SIM_LIBUSB:usb-1.0" \
             "CONFIG_COVERAGE_TOOLCHAIN:gcov" \
-            "CONFIG_SCHED_BACKTRACE:unwind(Make cond path)" ; do
+            "CONFIG_SCHED_BACKTRACE:unwind-cond-make-path" ; do
             opt="${pair%%:*}"; lib="${pair##*:}"
-            n=$(grep -rl "^${opt}=y" boards/sim/sim/sim/configs/*/defconfig 2>/dev/null | wc -l | tr -d ' ')
-            printf '%-26s -> %-24s %s config(s)\n' "$opt" "$lib" "$n"
+            # grep may legitimately match nothing; keep the step alive.
+            n=$(grep -rl "^${opt}=y" boards/sim/sim/sim/configs/*/defconfig 2>/dev/null | wc -l | tr -d ' ') || n=0
+            printf '%-26s -> %-24s %s config(s)\n' "$opt" "$lib" "${n:-0}"
           done
           echo
           echo "--- citest specifically ---"
@@ -117,6 +163,7 @@ jobs:
               echo "  $opt=y"
             fi
           done
+          true
 
       - name: Confirm the manifest provides none of these
         run: |
