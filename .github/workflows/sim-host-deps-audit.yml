@@ -135,6 +135,69 @@ jobs:
           docker run --rm -v /tmp/marfch.sh:/marfch.sh "$CI_IMAGE" bash /marfch.sh \
             2>&1 | tee /tmp/marfch-out.txt
 
+      - name: Why does -lunwind still fail after installing the dev package
+        run: |
+          cat > /tmp/diag.sh <<'EOS'
+          set -u
+          echo "=== BEFORE: every libunwind file, with symlink targets resolved ==="
+          for d in /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu /usr/lib /usr/local/lib; do
+            [ -d "$d" ] || continue
+            for f in "$d"/libunwind*; do
+              [ -e "$f" ] || [ -L "$f" ] || continue
+              if [ -L "$f" ]; then
+                tgt=$(readlink "$f")
+                if [ -e "$f" ]; then st="-> $tgt (resolves)"; else st="-> $tgt (DANGLING)"; fi
+              else
+                st="(regular file)"
+              fi
+              printf '  %-52s %s\n' "$f" "$st"
+            done
+          done
+          echo
+          echo "=== dpkg: which packages own them ==="
+          dpkg -S /usr/lib/x86_64-linux-gnu/libunwind.so 2>&1 | head -3
+          dpkg -l | grep -iE 'unwind' | awk '{printf "  %s %s %s\n",$1,$2,$3}'
+          echo
+          echo "=== what ld actually searches and rejects ==="
+          echo 'int main(){return 0;}' > /tmp/t.cpp
+          c++ /tmp/t.cpp -lunwind -o /dev/null 2>&1 | head -5
+          echo "--- ld --verbose (search path attempts) ---"
+          c++ /tmp/t.cpp -lunwind -o /dev/null -Wl,--verbose 2>&1 \
+            | grep -iE 'attempt to open|cannot find' | grep -i unwind | head -12
+          echo
+          echo "############ now install the dev package for real ############"
+          apt-get update -qq 2>/dev/null >/dev/null || true
+          apt-get install -y libunwind-dev 2>&1 | tail -6
+          echo "apt exit: $?"
+          echo
+          echo "=== AFTER: files again ==="
+          for f in /usr/lib/x86_64-linux-gnu/libunwind*.so /usr/lib/x86_64-linux-gnu/libunwind*.a; do
+            [ -e "$f" ] || [ -L "$f" ] || continue
+            if [ -L "$f" ]; then
+              tgt=$(readlink "$f")
+              [ -e "$f" ] && st="-> $tgt (resolves)" || st="-> $tgt (DANGLING)"
+            else
+              st="(regular file)"
+            fi
+            printf '  %-52s %s\n' "$f" "$st"
+          done
+          echo "  header /usr/include/libunwind.h: $([ -f /usr/include/libunwind.h ] && echo present || echo ABSENT)"
+          ls /usr/include/libunwind* 2>/dev/null | head -5 || true
+          echo
+          echo "=== AFTER: link test ==="
+          if c++ /tmp/t.cpp -lunwind -o /dev/null 2>/tmp/err.txt; then
+            echo "  LINK OK"
+          else
+            echo "  LINK FAILED:"; sed 's/^/    /' /tmp/err.txt | head -5
+          fi
+          echo
+          echo "=== is the LLVM libunwind (libunwind-14) a usable alternative? ==="
+          ls -l /usr/lib/x86_64-linux-gnu/libunwind.so.1* 2>/dev/null || true
+          echo "(end)"
+          EOS
+          docker run --rm -v /tmp/diag.sh:/diag.sh "$CI_IMAGE" bash /diag.sh \
+            2>&1 | tee /tmp/diag-out.txt
+
       - name: Which sim configs need which extra library
         run: |
           set -u
