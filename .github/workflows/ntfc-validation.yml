@@ -287,7 +287,7 @@ jobs:
               fail=1
             fi
           done <<'NEEDLES'
-          ntfc==0.0.2 pytest==7.4.4
+          ntfc==0.0.1 pytest==7.4.4
           -e NTFCDIR=/workspace/.ntfc
           --branch release-0.0.1
           https://github.com/apache/nuttx-ntfc-testing.git
@@ -497,7 +497,7 @@ jobs:
                 apt-get update -qq && \
                 apt-get install -y -qq --no-install-recommends python3-venv && \
                 python3 -m venv /workspace/.ntfc-venv && \
-                /workspace/.ntfc-venv/bin/pip install --quiet ntfc==0.0.2 pytest==7.4.4 && \
+                /workspace/.ntfc-venv/bin/pip install --quiet ntfc==0.0.1 pytest==7.4.4 && \
                 export PATH=/workspace/.ntfc-venv/bin:\$PATH && ntfc --help > /dev/null && \
                 rm -rf /workspace/.ntfc && mkdir -p /workspace/.ntfc/external && \
                 git clone --depth=1 --branch release-0.0.1 \
