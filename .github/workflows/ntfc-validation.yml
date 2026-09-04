@@ -299,6 +299,7 @@ jobs:
           rm -rf "$vendored_libcxx"
           apt-get install -y -qq --no-install-recommends libunwind-dev libunwind-dev:i386
           apt-get install -y -qq --no-install-recommends python3-venv
+          [ "$i" != 3 ] || exit 1
           NEEDLES
           echo
           if [ "$fail" -ne 0 ]; then
@@ -510,7 +511,9 @@ jobs:
             # the image has only the libunwind8 runtime, so install the dev
             # package inside the build container. Both arches because seven sim
             # configs are 32-bit and the package is Multi-Arch: same.
-            ntfc_prep="apt-get update -qq && apt-get install -y -qq --no-install-recommends libunwind-dev libunwind-dev:i386 && "
+            # Retried: run-time installs depend on archive.ubuntu.com, and a
+            # run was already lost to every mirror timing out.
+            ntfc_prep='for i in 1 2 3; do apt-get update -qq && apt-get install -y -qq --no-install-recommends libunwind-dev libunwind-dev:i386 && break; echo "apt attempt $i failed for libunwind-dev"; [ "$i" != 3 ] || exit 1; sleep 15; done; '
           fi
 
           set +e
@@ -553,8 +556,10 @@ jobs:
               -e ARTIFACTCONFDIR="/workspace/${ci_artifact_name}" \
               "$CI_IMAGE" \
               /bin/bash -c "set -e && python3 --version && \
-                apt-get update -qq && \
-                apt-get install -y -qq --no-install-recommends python3-venv && \
+                for i in 1 2 3; do apt-get update -qq && \
+                  apt-get install -y -qq --no-install-recommends python3-venv && break; \
+                  echo \"apt attempt \$i failed for python3-venv\"; \
+                  [ \"\$i\" != 3 ] || exit 1; sleep 15; done && \
                 python3 -m venv /workspace/.ntfc-venv && \
                 /workspace/.ntfc-venv/bin/pip install --quiet ntfc==0.0.1 pytest==7.4.4 && \
                 export PATH=/workspace/.ntfc-venv/bin:\$PATH && ntfc --help > /dev/null && \
