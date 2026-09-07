@@ -1,6 +1,10 @@
 {
     "module": {
-        "include_module": [],
+        "include_module":
+        [
+            "Nuttx_System_Arch_Nsh",
+            "Nuttx_System_Arch_Example"
+        ],
         "exclude_module":
         [
             "Nuttx_System_Driver_Pm",
