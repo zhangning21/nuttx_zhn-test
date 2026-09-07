@@ -88,7 +88,7 @@ jobs:
       MANIFEST_BRANCH: dev
       UNDER_TEST_BRANCH: ci/ntfc-flaky-arch
       TASK: ${{ github.event.inputs.task || 'sim:citest@cmake@ntfc' }}
-      ROUNDS: '12'
+      ROUNDS: '1'
     steps:
       - name: Maximize build space
         uses: easimon/maximize-build-space@v10
@@ -329,7 +329,7 @@ jobs:
                   echo \"apt attempt \$i failed for python3-venv\"; \
                   [ \"\$i\" != 3 ] || exit 1; sleep 15; done && \
                 python3 -m venv /workspace/.ntfc-venv && \
-                /workspace/.ntfc-venv/bin/pip install --quiet ntfc==0.0.1 pytest==7.4.4 && \
+                /workspace/.ntfc-venv/bin/pip install --quiet ntfc==0.0.2 pytest==7.4.4 && \
                 export PATH=/workspace/.ntfc-venv/bin:\$PATH && ntfc --help > /dev/null && \
                 rm -rf /workspace/.ntfc && mkdir -p /workspace/.ntfc/external && \
                 git clone --depth=1 --branch release-0.0.1 \
@@ -401,6 +401,36 @@ jobs:
             logs/
             artifacts/
           retention-days: 14
+
+      - name: Probe whether include_module still works on 0.0.2
+        if: ${{ always() }}
+        run: |
+          set -uo pipefail
+          L=logs/ntfc-round-1.log
+          if [ ! -f "$L" ]; then echo "no round log"; exit 0; fi
+          C=$(sed 's/\x1b\[[0-9;]*m//g' "$L")
+          echo "=== collection lines ==="
+          echo "$C" | grep -aoE 'collected [0-9]+ items?' | sort -u
+          echo
+          echo "=== executed (pytest tail) ==="
+          echo "$C" | grep -aoE '[0-9]+ (failed|passed)[^=]*in [0-9.]+s' | tail -1
+          echo
+          echo "=== was the session cut off by the 6000 s ceiling ==="
+          if echo "$C" | grep -aq 'session-timeout'; then
+            echo "  YES -- include_module likely ineffective on 0.0.2:"
+            echo "  the run executed far beyond the arch modules and hit the ceiling."
+          else
+            echo "  no -- the session finished on its own"
+          fi
+          echo
+          echo "=== which modules actually ran ==="
+          echo "$C" | grep -aoE 'nuttx-testing/[a-z0-9_/]+\.py' | sed 's#nuttx-testing/##' \
+            | cut -d/ -f1-2 | sort | uniq -c | sort -rn | head -10
+          echo
+          echo "=== flood verdict ==="
+          n=$(echo "$C" | grep -ac 'Device flood' || true)
+          echo "  'Device flood' occurrences: $n"
+          echo "$C" | grep -aE '^FAILED ' | sed 's#.*nuttx-testing/##' | sort -u
 
       - name: Summarize flaky results
         if: ${{ always() }}
