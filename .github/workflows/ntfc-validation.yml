@@ -52,11 +52,11 @@
 # not expected to need), and whether the runner can reach the LLVM release
 # download that FetchContent now requires.
 
-name: NTFC validation on the zhn-test image
+name: NTFC with libcxx PR3, vendored copy kept
 
 on:
   push:
-    branches: [ci/ntfc-newimage]
+    branches: [ci/libcxx-pr3]
   workflow_dispatch:
     inputs:
       task:
@@ -89,7 +89,7 @@ jobs:
       # be installed at run time. Built by zhn-test/public-actions 3273252.
       CI_IMAGE: ghcr.io/zhn-test/openvela-ci-linux_from_apache:latest
       MANIFEST_BRANCH: dev
-      UNDER_TEST_BRANCH: ci/ntfc-newimage
+      UNDER_TEST_BRANCH: ci/libcxx-pr3
       TASK: ${{ github.event.inputs.task || 'sim:citest@cmake@ntfc' }}
     steps:
       - name: Maximize build space
@@ -206,23 +206,40 @@ jobs:
           echo "build_cmd=$build_cmd"
 
           if [ "$run_ntfc" -eq 1 ]; then
-            # Mirrors ci-real.yml. The orchestration job asserts these lines are
-            # present verbatim in the real file.
-            vendored_libcxx=nuttx/libs/libxx/libcxx/libcxx
-            if [ -d "$vendored_libcxx" ]; then
-              echo "Removing the vendored libc++ for the ntfc build: $vendored_libcxx"
-              rm -rf "$vendored_libcxx"
+            # The vendored libc++ is KEPT. Instead of removing it, apply
+            # open-vela/nuttx_libs_libxx_libcxx#3 to it, which is where the
+            # constexpr destructor actually lives. That PR inverts the guard:
+            # today only clang gets _LIBCPP_CONSTEXPR_SINCE_CXX20 on
+            # ~basic_string(), which is why basic_string is not a literal type
+            # under GCC and the constexpr operator""s that returns it is
+            # rejected. After the PR everything except (__arm__ && !clang) gets
+            # the qualifier, so x86_64 GCC should get it too.
+            LIBCXX_DIR=nuttx/libs/libxx/libcxx/libcxx
+            test -d "$LIBCXX_DIR" || { echo "::error::vendored libc++ missing"; exit 1; }
+            echo "=== before ==="
+            grep -n -B4 'inline ~basic_string' "$LIBCXX_DIR/include/string" | head -12 \
+              | tee logs/libcxx-before.txt
+            echo "=== applying nuttx_libs_libxx_libcxx#3 ==="
+            git -C "$LIBCXX_DIR" fetch --depth=3 \
+              https://github.com/open-vela/nuttx_libs_libxx_libcxx.git \
+              refs/pull/3/head:pr3
+            git -C "$LIBCXX_DIR" log --oneline -1 pr3
+            base=$(git -C "$LIBCXX_DIR" merge-base HEAD pr3 || true)
+            if [ -z "$base" ]; then echo "::error::no common base with PR3"; exit 1; fi
+            commits=$(git -C "$LIBCXX_DIR" rev-list --reverse HEAD..pr3)
+            if [ -z "$commits" ]; then
+              echo "PR3 already contained in the checkout"
             else
-              echo "No vendored libc++ present; nothing to remove."
+              git -C "$LIBCXX_DIR" -c user.email=ci@example.invalid \
+                -c user.name=ci cherry-pick $commits \
+                || { echo "::error::could not apply PR3"; \
+                     git -C "$LIBCXX_DIR" cherry-pick --abort || true; exit 1; }
             fi
-            # Record what the prune actually changed, so the log shows whether
-            # the upstream FetchContent path was taken afterwards.
-            ls -d nuttx/libs/libxx/libcxx/* 2>/dev/null | tee logs/libcxx-after-prune.txt || true
-            # Mirrors ci-real.yml: arch/sim links -lunwind unconditionally but
-            # the image has only the libunwind8 runtime, so install the dev
-            # package inside the build container. Both arches because seven sim
-            # configs are 32-bit and the package is Multi-Arch: same.
-            # The image already carries libunwind-dev; nothing to install.
+            echo "=== after ==="
+            grep -n -B4 'inline ~basic_string' "$LIBCXX_DIR/include/string" | head -12 \
+              | tee logs/libcxx-after.txt
+            echo "=== is the constexpr qualifier now active for non-arm? ==="
+            grep -n '__arm__' "$LIBCXX_DIR/include/string" | head -3 | tee -a logs/libcxx-after.txt
           fi
 
           set +e
