@@ -52,11 +52,11 @@
 # not expected to need), and whether the runner can reach the LLVM release
 # download that FetchContent now requires.
 
-name: NTFC validation on the zhn-test image
+name: NTFC with PR375, vendored libc++ kept
 
 on:
   push:
-    branches: [ci/ntfc-newimage]
+    branches: [ci/pr375-keep-libcxx]
   workflow_dispatch:
     inputs:
       task:
@@ -89,7 +89,7 @@ jobs:
       # be installed at run time. Built by zhn-test/public-actions 3273252.
       CI_IMAGE: ghcr.io/zhn-test/openvela-ci-linux_from_apache:latest
       MANIFEST_BRANCH: dev
-      UNDER_TEST_BRANCH: ci/ntfc-newimage
+      UNDER_TEST_BRANCH: ci/pr375-keep-libcxx
       TASK: ${{ github.event.inputs.task || 'sim:citest@cmake@ntfc' }}
     steps:
       - name: Maximize build space
@@ -206,23 +206,21 @@ jobs:
           echo "build_cmd=$build_cmd"
 
           if [ "$run_ntfc" -eq 1 ]; then
-            # Mirrors ci-real.yml. The orchestration job asserts these lines are
-            # present verbatim in the real file.
-            vendored_libcxx=nuttx/libs/libxx/libcxx/libcxx
-            if [ -d "$vendored_libcxx" ]; then
-              echo "Removing the vendored libc++ for the ntfc build: $vendored_libcxx"
-              rm -rf "$vendored_libcxx"
-            else
-              echo "No vendored libc++ present; nothing to remove."
-            fi
-            # Record what the prune actually changed, so the log shows whether
-            # the upstream FetchContent path was taken afterwards.
-            ls -d nuttx/libs/libxx/libcxx/* 2>/dev/null | tee logs/libcxx-after-prune.txt || true
-            # Mirrors ci-real.yml: arch/sim links -lunwind unconditionally but
-            # the image has only the libunwind8 runtime, so install the dev
-            # package inside the build container. Both arches because seven sim
-            # configs are 32-bit and the package is Multi-Arch: same.
-            # The image already carries libunwind-dev; nothing to install.
+            # The vendored libc++ is deliberately KEPT this round, to find out
+            # whether the new patch from open-vela/nuttx#375 makes it compile
+            # with the host GCC that sim uses.
+            echo "=== vendored libc++ kept on purpose ==="
+            ls -d nuttx/libs/libxx/libcxx/* 2>/dev/null | tee logs/libcxx-state.txt || true
+            echo "--- PR375 patch file present in the tree? ---"
+            ls -l nuttx/libs/libxx/libcxx/*constexpr-dtor* 2>&1 \
+              | tee -a logs/libcxx-state.txt || true
+            echo "--- does the vendored copy still declare a constexpr dtor? ---"
+            grep -n 'CONSTEXPR_SINCE_CXX20 ~basic_string' \
+              nuttx/libs/libxx/libcxx/libcxx/include/string 2>&1 | head -3 \
+              | tee -a logs/libcxx-state.txt || true
+            echo "--- was the patch applied to it? (arm-only guard) ---"
+            grep -n '__arm__' nuttx/libs/libxx/libcxx/libcxx/include/string 2>&1 \
+              | head -3 | tee -a logs/libcxx-state.txt || true
           fi
 
           set +e
