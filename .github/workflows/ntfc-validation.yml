@@ -52,11 +52,11 @@
 # not expected to need), and whether the runner can reach the LLVM release
 # download that FetchContent now requires.
 
-name: NTFC with libcxx PR3, vendored copy kept
+name: NTFC final shape on the community image
 
 on:
   push:
-    branches: [ci/libcxx-pr3]
+    branches: [ci/final-verify]
   workflow_dispatch:
     inputs:
       task:
@@ -87,9 +87,9 @@ jobs:
       # The zhn-test image, aligned with open-vela's and carrying
       # libunwind-dev, libunwind-dev:i386 and python3-venv, so nothing has to
       # be installed at run time. Built by zhn-test/public-actions 3273252.
-      CI_IMAGE: ghcr.io/zhn-test/openvela-ci-linux_from_apache:latest
+      CI_IMAGE: ghcr.io/open-vela/openvela-ci-linux_from_apache-nuttx:latest
       MANIFEST_BRANCH: dev
-      UNDER_TEST_BRANCH: ci/libcxx-pr3
+      UNDER_TEST_BRANCH: ci/final-verify
       TASK: ${{ github.event.inputs.task || 'sim:citest@cmake@ntfc' }}
     steps:
       - name: Maximize build space
