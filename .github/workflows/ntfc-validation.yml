@@ -1,0 +1,366 @@
+# Fork-only validation for the "ntfc" CI group.
+#
+# NOT FOR UPSTREAM. This file exists only on the validation branch of the fork.
+#
+# open-vela/public-actions#69 adds an "ntfc" group to ci-real.yml: it builds one
+# task with CMake and then runs the NuttX Test Framework Controller on the
+# output. The real two-hop caller chain cannot be exercised from a fork:
+#
+#   nuttx/.github/workflows/ci.yml
+#     -> open-vela/public-actions/.github/workflows/ci.yml@dev      (hardcoded)
+#        -> open-vela/public-actions/.github/workflows/ci-real.yml@dev (hardcoded)
+#
+# and ci-real.yml additionally requires secrets.APP_ID with "owner: open-vela",
+# resolves dependencies against a snapshot manifest by repository basename, and
+# fetches PR refs from the manifest remote (open-vela). None of that can be
+# satisfied outside the open-vela organisation.
+#
+# So this workflow validates the change in two layers instead:
+#
+#   orchestration - static, and it reads the REAL ci-real.yml from both the
+#                   upstream dev branch and the pull request branch. It asserts
+#                   the five pre-existing groups are untouched, the new group is
+#                   shaped as intended, and it executes the flag-parsing snippet
+#                   extracted verbatim from the real file against every real
+#                   task string. It also asserts that the commands inlined in
+#                   the build job below are byte-for-byte present in the real
+#                   file, so this workflow cannot drift from what #69 proposes.
+#
+#   build-ntfc    - dynamic. Same image, same manifest, same build command and
+#                   same NTFC invocation as the ntfc group, run for real.
+#
+# The nuttx change under test is applied to the manifest checkout by
+# cherry-pick, because the branch is based on the same open-vela/nuttx dev
+# commit that the manifest resolves to.
+#
+# What this run is expected to show, after public-actions e0a2d31 started
+# pruning the manifest's vendored libc++ for ntfc-flagged tasks:
+#
+#   - the prune happens, and the directory listing recorded right after it
+#     shows the vendored checkout gone;
+#   - libs/libxx/libcxx/CMakeLists.txt then takes its FetchContent branch,
+#     downloading libcxx-17.0.6.src.tar.xz and applying the five NuttX
+#     patches, so the build no longer compiles the clang-only fork;
+#   - all 35 previously failing targets clear, including the two outside
+#     libcxx itself (libcxxabi's cxa_demangle.cpp and apps cxxtest), which
+#     only failed because they include headers from the pruned path;
+#   - the build reaches the NTFC step, which no earlier validation run did.
+#
+# Two things remain unverified going in: whether the upstream libc++ builds
+# clean with the GCC 12.3.0 that the manifest ships (openvela carries five
+# patches where Apache carries six, missing the GCC 14 one, which 12.3.0 is
+# not expected to need), and whether the runner can reach the LLVM release
+# download that FetchContent now requires.
+
+name: ntfc group without the nuttx#346 metadata
+
+on:
+  push:
+    branches: [ci/no346]
+  workflow_dispatch:
+    inputs:
+      task:
+        description: 'Task with flags, e.g. sim:citest@cmake@ntfc'
+        default: 'sim:citest@cmake@ntfc'
+        required: true
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  # The pull request that adds the ntfc group, and the branch it lives on.
+  PA_REPO: zhangning21/public-actions_openvela
+  PA_BRANCH: ci/sim-citest-ntfc
+  PA_UPSTREAM_REPO: open-vela/public-actions
+  PA_UPSTREAM_BRANCH: dev
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Layer 1: the orchestration change itself, checked against the real files.
+  # ---------------------------------------------------------------------------
+  build-ntfc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      DOCKER_BUILDKIT: 1
+      # The zhn-test image, aligned with open-vela's and carrying
+      # libunwind-dev, libunwind-dev:i386 and python3-venv, so nothing has to
+      # be installed at run time. Built by zhn-test/public-actions 3273252.
+      CI_IMAGE: ghcr.io/open-vela/openvela-ci-linux_from_apache-nuttx:latest
+      MANIFEST_BRANCH: dev
+      UNDER_TEST_BRANCH: ci/no346
+      TASK: ${{ github.event.inputs.task || 'sim:citest@cmake@ntfc' }}
+    steps:
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@v10
+        with:
+          root-reserve-mb: 4096
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+
+      - name: Download and install repo
+        run: |
+          mkdir -p ~/bin
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
+          ~/bin/repo --version
+          git config --global user.email "openvela-robot@xiaomi.com"
+          git config --global user.name "openvela-robot"
+
+      - name: Clean up disk space
+        run: |
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          sudo rm -rf /etc/apt/sources.list.d/* /usr/local/lib/android /etc/mysql /etc/php /opt/hostedtoolcache/CodeQL
+          sudo docker builder prune -a 2>/dev/null || true
+          df -h
+
+      # Same manifest, branch and groups as ci-real.yml's Repo Init.
+      - name: Repo init and sync
+        run: |
+          ~/bin/repo init -u https://github.com/open-vela/manifests \
+            -b "$MANIFEST_BRANCH" -m openvela.xml \
+            --group=default,platform-linux --depth=1 --git-lfs
+          ~/bin/repo sync -c -d --no-tags -j12
+          ~/bin/repo manifest -r -o /tmp/snapshot.xml
+          echo "=== manifest revision for nuttx ==="
+          grep -E 'name="nuttx"' /tmp/snapshot.xml || true
+          df -h
+
+      - name: Apply the nuttx change under test
+        run: |
+          set -x
+          cd nuttx
+          echo "manifest checkout: $(git rev-parse HEAD)"
+          git fetch "https://github.com/${{ github.repository }}.git" \
+            "$UNDER_TEST_BRANCH:under-test"
+          git log --oneline -3 under-test
+          commits=$(git rev-list --reverse HEAD..under-test)
+          if [ -z "$commits" ]; then
+            echo "nothing to apply; the branch is already contained in dev"
+          else
+            # The validation workflow itself is not part of the change under
+            # test; only the board metadata commit is applied.
+            git cherry-pick -x $commits || {
+              git cherry-pick --abort || true
+              echo "::error::could not apply the change under test"
+              exit 1
+            }
+          fi
+          echo "=== configuration under test ==="
+          ls -l boards/sim/sim/sim/configs/citest/
+          test -f boards/sim/sim/sim/configs/citest/config.yaml
+          test -x boards/sim/sim/sim/configs/citest/run.sh
+          grep -n CONFIG_SYSTEM_SETLOGMASK boards/sim/sim/sim/configs/citest/defconfig
+
+      - name: Move docker data to build volume
+        run: |
+          sudo systemctl stop docker
+          sudo mv /var/lib/docker "${{ github.workspace }}/docker"
+          sudo ln -s "${{ github.workspace }}/docker" /var/lib/docker
+          sudo systemctl start docker
+
+      - name: Docker pull
+        run: |
+          docker pull "$CI_IMAGE"
+          df -h
+
+      - name: Build the task and run NTFC
+        id: run
+        continue-on-error: true
+        env:
+          CI_WORKSPACE: ${{ github.workspace }}
+        run: |
+          set -o pipefail
+          mkdir -p logs
+
+          # This block mirrors ci-real.yml's ntfc path. The orchestration job
+          # above asserts the NTFC commands are present verbatim in that file.
+          task="$TASK"
+          cmake_flag=""
+          cp_base_dir="nuttx"
+          task_flags=""
+          run_ntfc=0
+          ntfc_prep=""
+          echo "=== Starting task: $task ==="
+          if [[ "$task" == *@* ]]; then
+            cmake_flag="--cmake"
+            task_flags="${task#*@}"
+            task=$(echo "$task" | awk -F '@' '{print $1}')
+            cp_base_dir="cmake_out/*"
+          fi
+          if [[ "@${task_flags}@" == *"@ntfc@"* ]]; then
+            run_ntfc=1
+          fi
+          if [[ "$task" == *:* ]] || [[ "$task" == *vendor/* ]]; then
+            build_cmd="./build.sh $task $cmake_flag -e -Werror -j8"
+          else
+            build_cmd="./build.sh vendor/openvela/boards/vela/configs/$task $cmake_flag -e -Werror -j8"
+          fi
+          echo "task=$task  flags=${task_flags:-none}  ntfc=$run_ntfc"
+          echo "build_cmd=$build_cmd"
+
+          if [ "$run_ntfc" -eq 1 ]; then
+            # The vendored libc++ is KEPT. Instead of removing it, apply
+            # open-vela/nuttx_libs_libxx_libcxx#3 to it, which is where the
+            # constexpr destructor actually lives. That PR inverts the guard:
+            # today only clang gets _LIBCPP_CONSTEXPR_SINCE_CXX20 on
+            # ~basic_string(), which is why basic_string is not a literal type
+            # under GCC and the constexpr operator""s that returns it is
+            # rejected. After the PR everything except (__arm__ && !clang) gets
+            # the qualifier, so x86_64 GCC should get it too.
+            # libcxx#3 is merged and openvela.xml pins this project to the
+            # default revision "dev", so repo sync alone must already bring the
+            # fix in. Assert that, do not apply anything.
+            LIBCXX_DIR=nuttx/libs/libxx/libcxx/libcxx
+            test -d "$LIBCXX_DIR" || { echo "::error::vendored libc++ missing"; exit 1; }
+            git -C "$LIBCXX_DIR" log --oneline -3 | tee logs/libcxx-log.txt
+            grep -n -B2 -A3 'inline ~basic_string' "$LIBCXX_DIR/include/string" \
+              | tee logs/libcxx-state.txt
+            if grep -q 'defined(__arm__) && !defined(__clang__)' "$LIBCXX_DIR/include/string"; then
+              echo "libcxx#3 present in the synced checkout"
+            else
+              echo "::error::libcxx#3 NOT present after plain repo sync"
+              exit 1
+            fi
+          fi
+
+          set +e
+          docker run --rm \
+            -v "${CI_WORKSPACE}":/workspace \
+            -w /workspace \
+            "$CI_IMAGE" \
+            /bin/bash -c "${ntfc_prep}$build_cmd" 2>&1 | tee logs/build.log
+          build_rc=${PIPESTATUS[0]}
+          set -e
+          echo "build_rc=$build_rc" | tee logs/build_rc.txt
+          if [ "$build_rc" -ne 0 ]; then
+            echo "::error::build failed for $task (rc=$build_rc); see the build.log artifact"
+            exit "$build_rc"
+          fi
+
+          echo "=== Backup build results for $task ==="
+          ci_artifact_name="artifacts/${task//:/_}"
+          mkdir -p "$ci_artifact_name"
+          cp -a $cp_base_dir/nuttx "$ci_artifact_name"/ 2>/dev/null || true
+          cp -a $cp_base_dir/.config "$ci_artifact_name"/ 2>/dev/null || true
+          ls -al "$ci_artifact_name" | tee logs/artifact-ls.txt
+
+          if [ "$run_ntfc" -eq 1 ]; then
+            echo "=== Run NTFC runtime test: $task ==="
+            ntfc_board="${task%%:*}"
+            ntfc_config="${task##*:}"
+            ntfc_cfgdir=$(ls -d nuttx/boards/*/*/"${ntfc_board}"/configs/"${ntfc_config}" 2>/dev/null | head -1)
+            if [ -z "$ntfc_cfgdir" ] || [ ! -f "$ntfc_cfgdir/config.yaml" ] || [ ! -x "$ntfc_cfgdir/run.sh" ]; then
+              echo "::error::$task is flagged ntfc but has no config.yaml and executable run.sh"
+              exit 1
+            fi
+            echo "NTFC metadata: $ntfc_cfgdir"
+            set +e
+            docker run --rm \
+              -v "${CI_WORKSPACE}":/workspace \
+              -w /workspace \
+              -e NTFCDIR=/workspace/.ntfc \
+              -e CURRENTCONFDIR="/workspace/${ntfc_cfgdir}" \
+              -e ARTIFACTCONFDIR="/workspace/${ci_artifact_name}" \
+              "$CI_IMAGE" \
+              /bin/bash -c "set -e && python3 --version && \
+                python3 -m venv /workspace/.ntfc-venv && \
+                /workspace/.ntfc-venv/bin/pip install --quiet ntfc==0.0.1 pytest==7.4.4 && \
+                export PATH=/workspace/.ntfc-venv/bin:\$PATH && ntfc --help > /dev/null && \
+                rm -rf /workspace/.ntfc && mkdir -p /workspace/.ntfc/external && \
+                git clone --depth=1 --branch release-0.0.1 \
+                  https://github.com/apache/nuttx-ntfc-testing.git \
+                  /workspace/.ntfc/external/nuttx-testing && \
+                cp -a ${ci_artifact_name}/. nuttx/ && ls -atl nuttx/nuttx nuttx/.config && \
+                bash /workspace/${ntfc_cfgdir}/run.sh" 2>&1 | tee logs/ntfc.log
+            ntfc_rc=${PIPESTATUS[0]}
+            set -e
+            echo "ntfc_rc=$ntfc_rc" | tee logs/ntfc_rc.txt
+            if [ "$ntfc_rc" -ne 0 ]; then
+              echo "::error::NTFC failed for $task (rc=$ntfc_rc); see the ntfc.log artifact"
+              exit "$ntfc_rc"
+            fi
+            echo "NTFC runtime test passed: $task"
+          fi
+
+      # If the BUILD failed, enumerate every independently failing target rather
+      # than stopping at the first one, so one run yields the whole list. Gated
+      # on build_rc rather than the step outcome: when the build succeeds and
+      # only NTFC fails, re-running the build here would relink an already
+      # complete tree and report a bogus failing target.
+      - name: Enumerate all build failures
+        if: ${{ steps.run.outcome == 'failure' }}
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          mkdir -p logs
+          if [ "$(cat logs/build_rc.txt 2>/dev/null | tr -dc '0-9')" = "0" ]; then
+            echo "build_rc=0: the build succeeded and the failure came later"
+            echo "(nothing to enumerate; see ntfc.log)"
+            exit 0
+          fi
+          bdir=$(ls -d cmake_out/* 2>/dev/null | head -1)
+          if [ -z "$bdir" ]; then
+            echo "no cmake build directory; the failure happened before configure"
+            exit 0
+          fi
+          echo "build dir: $bdir"
+          docker run --rm \
+            -v "${{ github.workspace }}":/workspace \
+            -w /workspace \
+            "$CI_IMAGE" \
+            /bin/bash -c "
+              set +e ;
+              echo '=== keep-going build ===' ;
+              cmake --build $bdir -- -k 0
+            " 2>&1 | tee logs/keep-going.log || true
+          echo
+          echo "=== distinct failing targets ==="
+          grep -E '^FAILED: ' logs/keep-going.log | sort -u | tee logs/failed-targets.txt | head -60
+          echo "total distinct failing targets: $(wc -l < logs/failed-targets.txt)"
+          echo
+          echo "=== error signatures ==="
+          grep -oE 'error: .*' logs/keep-going.log | sed 's/[0-9]\+/N/g' \
+            | sort | uniq -c | sort -rn | head -20 | tee logs/error-classes.txt
+
+      - name: Collect diagnostics
+        if: ${{ always() }}
+        continue-on-error: true
+        run: |
+          mkdir -p logs
+          df -h > logs/df.txt 2>&1 || true
+          ls -al cmake_out/* > logs/cmake_out-ls.txt 2>&1 || true
+          find artifacts -type d -name ntfc > logs/artifacts-list.txt 2>&1 || true
+          (cd nuttx && git log --oneline -5) > logs/nuttx-head.txt 2>&1 || true
+          cp /tmp/snapshot.xml logs/ 2>/dev/null || true
+          docker run --rm -v "${{ github.workspace }}":/workspace -w /workspace \
+            "$CI_IMAGE" /bin/bash -c \
+            'for c in prebuilts/tools/linux/x86_64/gcc prebuilts/tools/linux/x86_64/c++; do
+               echo "--- $c"; $c --version 2>&1 | head -2; done' \
+            > logs/toolchain.txt 2>&1 || true
+
+      - name: Upload logs and artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ntfc-validation
+          path: |
+            logs/
+            artifacts/
+          retention-days: 14
+
+      - name: Report the outcome
+        if: ${{ always() }}
+        run: |
+          echo "build/NTFC step outcome: ${{ steps.run.outcome }}"
+          if [ "${{ steps.run.outcome }}" != "success" ]; then
+            echo "See the ntfc-validation artifact: build.log, keep-going.log,"
+            echo "failed-targets.txt and error-classes.txt enumerate the failures."
+            exit 1
+          fi
