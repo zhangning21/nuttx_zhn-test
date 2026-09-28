@@ -38,7 +38,7 @@ ret="$?"
 echo $ret
 
 if [ "$ret" -ne 0 ]; then
-  timeout 15 qemu-system-x86_64 -kernel ./nuttx -m 2G -smp 4 \
+  timeout 15 qemu-system-x86_64 -kernel ./nuttx -m 2G -smp 1 \
     -cpu max -nographic -serial file:qemu-direct.log -no-reboot \
     -no-shutdown -d guest_errors,cpu_reset -D qemu-debug.log || true
 fi
