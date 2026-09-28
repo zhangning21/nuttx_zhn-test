@@ -37,6 +37,12 @@ ntfc test --testpath=${testpath} --confpath=${confpath} --jsonconf=${jsonconf}
 ret="$?"
 echo $ret
 
+if [ "$ret" -ne 0 ]; then
+  timeout 15 qemu-system-x86_64 -kernel ./nuttx -m 2G -smp 4 \
+    -cpu max -nographic -serial file:qemu-direct.log -no-reboot \
+    -no-shutdown -d guest_errors,cpu_reset -D qemu-debug.log || true
+fi
+
 # export test results
 artifacts=${ARTIFACTCONFDIR}/ntfc
 mkdir -p ${artifacts}
@@ -44,9 +50,12 @@ mkdir -p ${artifacts}
 # A retried build already exported the previous attempt; replace it, or
 # "mv result" fails and the leftover directory makes the tree unclean.
 
-rm -rf ${artifacts}/result ${artifacts}/pytest.debug.log
+rm -rf ${artifacts}/result ${artifacts}/pytest.debug.log \
+  ${artifacts}/qemu-direct.log ${artifacts}/qemu-debug.log
 mv pytest.debug.log ${artifacts}
 mv result ${artifacts}
+[ -f qemu-direct.log ] && mv qemu-direct.log ${artifacts}
+[ -f qemu-debug.log ] && mv qemu-debug.log ${artifacts}
 
 # restore old dir
 cd ${olddir}
