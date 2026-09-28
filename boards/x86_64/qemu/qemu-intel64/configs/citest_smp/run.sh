@@ -32,6 +32,12 @@ cd ${nuttdir}
 confpath=${CURRENTCONFDIR}/config.yaml
 jsonconf=${CURRENTCONFDIR}/session.json
 testpath=${NTFCDIR}/external/nuttx-testing
+
+# Capture raw serial output before NTFC starts so boot failures remain
+# diagnosable even when the prompt is never detected.
+timeout 15 qemu-system-x86_64 -kernel ./nuttx -m 2G -smp 4 -cpu max \
+  -nographic -serial file:qemu-direct.log || true
+
 ntfc test --testpath=${testpath} --confpath=${confpath} --jsonconf=${jsonconf}
 
 ret="$?"
@@ -46,6 +52,7 @@ mkdir -p ${artifacts}
 
 rm -rf ${artifacts}/result ${artifacts}/pytest.debug.log
 mv pytest.debug.log ${artifacts}
+mv qemu-direct.log ${artifacts}
 mv result ${artifacts}
 
 # restore old dir
