@@ -57,18 +57,19 @@
  *
  ****************************************************************************/
 
-static bool free_delaylist(FAR struct mm_heap_s *heap, bool force)
+static bool free_delaylist_head(FAR struct mm_heap_s *heap,
+                               FAR struct mm_delayhead_s *delay,
+                               bool force)
 {
   bool ret = false;
 #if defined(CONFIG_BUILD_FLAT) || defined(__KERNEL__)
-  FAR struct mm_delayhead_s *delay = get_delayhead(heap);
   FAR struct mm_delaynode_s *tmp;
   irqstate_t flags;
   bool bypass;
 
   /* Move the delay list to local */
 
-  flags = up_irq_save();
+  flags = spin_lock_irqsave_notrace(&g_mm_delaylock);
   bypass = kasan_bypass(true);
 
   tmp = delay->head;
@@ -77,7 +78,7 @@ static bool free_delaylist(FAR struct mm_heap_s *heap, bool force)
   if (tmp == NULL || (!force &&
       delay->delaycount < CONFIG_MM_FREE_DELAYCOUNT_MAX))
     {
-      up_irq_restore(flags);
+      spin_unlock_irqrestore_notrace(&g_mm_delaylock, flags);
       return false;
     }
 
@@ -87,7 +88,7 @@ static bool free_delaylist(FAR struct mm_heap_s *heap, bool force)
   delay->head = NULL;
 
   kasan_bypass(bypass);
-  up_irq_restore(flags);
+  spin_unlock_irqrestore_notrace(&g_mm_delaylock, flags);
 
   /* Test if the delayed is empty */
 
@@ -112,6 +113,31 @@ static bool free_delaylist(FAR struct mm_heap_s *heap, bool force)
 #endif
   return ret;
 }
+
+static bool free_delaylist(FAR struct mm_heap_s *heap, bool force)
+{
+  return free_delaylist_head(heap, get_delayhead(heap), force);
+}
+
+#ifdef CONFIG_SMP
+/* EXPERIMENT (not for merge): an exiting thread queues its own stack on
+ * the delay list of the CPU it exits on, and that list is only drained by
+ * a later allocation on the same CPU.  Drain every CPU before giving up.
+ */
+
+static bool free_delaylist_all(FAR struct mm_heap_s *heap)
+{
+  bool ret = false;
+  int cpu;
+
+  for (cpu = 0; cpu < CONFIG_SMP_NCPUS; cpu++)
+    {
+      ret |= free_delaylist_head(heap, get_delayhead_cpu(heap, cpu), true);
+    }
+
+  return ret;
+}
+#endif
 
 #ifdef CONFIG_MM_RECORD_PID
 void mm_dump_handler(FAR struct tcb_s *tcb, FAR void *arg)
@@ -355,6 +381,13 @@ FAR void *mm_malloc(FAR struct mm_heap_s *heap, size_t size)
   /* Try again after free delay list */
 
   else if (free_delaylist(heap, true))
+    {
+      return mm_malloc(heap, size);
+    }
+#endif
+
+#ifdef CONFIG_SMP
+  else if (free_delaylist_all(heap))
     {
       return mm_malloc(heap, size);
     }

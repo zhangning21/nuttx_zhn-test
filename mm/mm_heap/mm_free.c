@@ -40,6 +40,12 @@
 #include "mm_heap/mm.h"
 
 /****************************************************************************
+ * Public Data
+ ****************************************************************************/
+
+spinlock_t g_mm_delaylock = SP_UNLOCKED;
+
+/****************************************************************************
  * Private Functions
  ****************************************************************************/
 
@@ -54,7 +60,7 @@ static void add_delaylist(FAR struct mm_heap_s *heap, FAR void *mem,
 
   /* Delay the deallocation until a more appropriate time. */
 
-  flags = up_irq_save();
+  flags = spin_lock_irqsave_notrace(&g_mm_delaylock);
   bypass = kasan_bypass(true);
 
 #ifdef CONFIG_DEBUG_ASSERTIONS
@@ -81,7 +87,7 @@ static void add_delaylist(FAR struct mm_heap_s *heap, FAR void *mem,
                */
 
               kasan_bypass(bypass);
-              up_irq_restore(flags);
+              spin_unlock_irqrestore_notrace(&g_mm_delaylock, flags);
               DEBUGASSERT(false);  /* Double-free detected! */
               return;
             }
@@ -123,7 +129,7 @@ static void add_delaylist(FAR struct mm_heap_s *heap, FAR void *mem,
     }
 
   kasan_bypass(bypass);
-  up_irq_restore(flags);
+  spin_unlock_irqrestore_notrace(&g_mm_delaylock, flags);
 #endif
 }
 

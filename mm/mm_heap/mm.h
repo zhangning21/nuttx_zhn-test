@@ -31,6 +31,7 @@
 
 #include <nuttx/mutex.h>
 #include <nuttx/sched.h>
+#include <nuttx/spinlock.h>
 #include <nuttx/fs/procfs.h>
 #include <nuttx/lib/math32.h>
 #include <nuttx/mm/mempool.h>
@@ -388,5 +389,17 @@ FAR struct mm_delayhead_s *get_delayhead(FAR struct mm_heap_s *heap)
   return &heap->delay;
 #endif
 }
+
+/* EXPERIMENT (not for merge): all delay lists share one lock so that a
+ * CPU whose allocation failed can drain the lists of the other CPUs.
+ */
+
+extern spinlock_t g_mm_delaylock;
+
+#ifdef CONFIG_SMP
+#  define get_delayhead_cpu(heap, cpu) (&(heap)->delay[cpu])
+#else
+#  define get_delayhead_cpu(heap, cpu) (&(heap)->delay)
+#endif
 
 #endif /* __MM_MM_HEAP_MM_H */
