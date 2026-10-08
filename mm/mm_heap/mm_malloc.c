@@ -84,8 +84,6 @@ static bool free_delaylist(FAR struct mm_heap_s *heap, bool force)
   delay->delaycount = 0;
 #  endif
 
-  delay->head = NULL;
-
   kasan_bypass(bypass);
   up_irq_restore(flags);
 
@@ -93,20 +91,31 @@ static bool free_delaylist(FAR struct mm_heap_s *heap, bool force)
 
   ret = !!tmp;
 
-  while (tmp)
+  /* Pop and free one node per iteration, advancing delay->head under
+   * the lock. The remaining chain stays anchored on delay->head the
+   * whole time: the callbacks and forcefree below may take locks and
+   * sleep, and a drain that never finishes must not strand detached
+   * nodes outside both the delay list and the free list - they would
+   * be unreachable and leak forever.
+   */
+
+  while (tmp != NULL)
     {
-      FAR void *address;
+      flags = up_irq_save();
+      bypass = kasan_bypass(true);
+      tmp = delay->head;
+      if (tmp == NULL)
+        {
+          kasan_bypass(bypass);
+          up_irq_restore(flags);
+          break;
+        }
 
-      /* Get the first delayed deallocation */
+      delay->head = tmp->flink;
+      kasan_bypass(bypass);
+      up_irq_restore(flags);
 
-      address = tmp;
-      tmp = tmp->flink;
-
-      /* The address should always be non-NULL since that was checked in the
-       * 'while' condition above.
-       */
-
-      mm_forcefree(heap, address);
+      mm_forcefree(heap, tmp);
     }
 
 #endif
