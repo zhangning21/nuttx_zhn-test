@@ -134,6 +134,10 @@ int board_app_initialize(uintptr_t arg)
   mount(NULL, CONFIG_LIBC_TMPDIR, "tmpfs", 0, NULL);
 #endif
 
+#ifdef CONFIG_FS_BINFS
+  mount(NULL, "/system/bin", "binfs", 0, NULL);
+#endif
+
 #endif
 
 #ifdef CONFIG_DRIVERS_VIRTIO_MMIO
